@@ -80,7 +80,7 @@ def db_init():
             season_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             actor_id INTEGER,                -- who initiated (staff/user)
-            action TEXT NOT NULL,            -- award | redeem | reset | deduct
+            action TEXT NOT NULL,            -- award | reset | deduct (redeem removed from public)
             delta INTEGER NOT NULL,           -- +/- change
             balance_before INTEGER NOT NULL,
             balance_after INTEGER NOT NULL,
@@ -129,6 +129,9 @@ def get_points(user_id: int) -> int:
         return int(cur.fetchone()[0])
 
 def apply_delta(user_id: int, delta: int, action: str, note: str | None, actor_id: int | None):
+    """
+    Atomic update: compute before/after, update balance, write ledger row.
+    """
     now = utc_now().isoformat()
     with db_connect() as conn:
         db_init()
@@ -165,6 +168,10 @@ def get_user_history_for_season(user_id: int, season_id: int, limit: int = 10):
         return cur.fetchall()
 
 def reset_all_points(actor_id: int | None):
+    """
+    Start a new season and set everyone's points to 0.
+    Writes a ledger reset entry for each user (history preserved).
+    """
     now = utc_now().isoformat()
     y, w = iso_year_week(utc_now())
     end_y, end_w = compute_end_week(y, w, SEASON_LENGTH_WEEKS)
@@ -276,37 +283,9 @@ async def deduct_cmd(interaction: discord.Interaction, member: discord.Member, a
     )
 
 
-@bot.tree.command(name="redeem", description="Spend points (multiples of 5) to redeem a prize.")
-async def redeem_cmd(interaction: discord.Interaction, amount: int, note: str = "prize"):
-    if amount <= 0:
-        await interaction.response.send_message("Amount must be a positive integer.", ephemeral=True)
-        return
-    if amount % 5 != 0:
-        await interaction.response.send_message("Redeem amount must be a multiple of **5**.", ephemeral=True)
-        return
-
-    try:
-        before, after, _ = apply_delta(interaction.user.id, -amount, "redeem", note, actor_id=interaction.user.id)
-    except ValueError:
-        current = get_points(interaction.user.id)
-        await interaction.response.send_message(
-            f"❌ Not enough points. You have **{current}**, need **{amount}**.",
-            ephemeral=True
-        )
-        return
-
-    await interaction.response.send_message(
-        f"🧾 **Redemption Receipt**\n"
-        f"User: {interaction.user.mention}\n"
-        f"Item: **{note}**\n"
-        f"Cost: **{amount} points**\n"
-        f"Balance: **{before} → {after}**"
-    )
-
-
 @bot.tree.command(
     name="history",
-    description="View point history for the current 24-week season (your own, or any user if staff)."
+    description="View point history for the current season (your own, or any user if staff)."
 )
 async def history_cmd(
     interaction: discord.Interaction,
@@ -320,10 +299,8 @@ async def history_cmd(
     """
     limit = max(1, min(limit, 20))
 
-    # Decide whose history we are viewing
     target = member or interaction.user
 
-    # Permission check if requesting someone else's history
     if member is not None:
         perms = interaction.user.guild_permissions
         if not perms.manage_guild:
@@ -392,3 +369,4 @@ if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN not found in .env")
 
 bot.run(TOKEN)
+
